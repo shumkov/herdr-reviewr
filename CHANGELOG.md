@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- A `tab`-placement open now names its fresh tab `reviewr` instead of leaving the bare
+  numeric label herdr assigns to new tabs. The rename is best-effort: when it fails, or an
+  older herdr omits `tab_id` from the pane-open result, the open still succeeds.
+
 ## [0.25.1] — 2026-07-27
 
 ### Changed

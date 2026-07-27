@@ -68,6 +68,7 @@ The cross-action invariants, coded for citation:
 | ------------------------- | ------------------------------------------------------------ |
 | `HH-PLACEMENT-CONFIGURED` | Every open uses the placement named by `toggle_placement`.  |
 | `HH-ONE-SIDEBAR`          | At most one sidebar exists per workspace, in steady state.  |
+| `HH-TAB-NAMED`            | A `tab` open names its fresh tab `reviewr`.                 |
 
 A manual open keeps focus on the agent for `split`, and gives focus to reviewr otherwise. The event auto-opens `split` and `tab` only, never takes focus, and does nothing at all with `auto_open = false`.
 
@@ -83,6 +84,8 @@ Each placement maps to one pane-open shape (`../docs/herdr-api-notes.md`):
 | `zoomed`  | `--target-pane` | none              | yes             |
 
 A `split` or `zoomed` open attaches to the focused pane. When the context has none, it attaches to the workspace's first pane.
+
+A `tab` open renames the tab herdr just created from its bare numeric label to `reviewr`, using the `tab_id` the pane-open result reports (→ HH-TAB-NAMED). The rename is cosmetic: when it fails — or an older herdr omits `tab_id` — the open still succeeds and the tab keeps its numeric label.
 
 **Placement changed between open and close**
 
