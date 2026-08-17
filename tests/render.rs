@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Repo, app_on, enter_tab};
-use herdr_reviewr::app::{App, Focus, Tab};
+use herdr_reviewr::app::{App, BaseChoice, BasePicker, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
@@ -80,7 +80,7 @@ fn composing(app: &mut App) {
 }
 
 #[test]
-fn invalid_config_replaces_the_entire_sidebar_with_its_error() {
+fn invalid_config_replaces_the_entire_pane_with_its_error() {
     let mut app = edited_app();
     app.set_config_error(
         "config /tmp/reviewr/config.toml: invalid value for `theme`; expected a built-in theme name"
@@ -92,7 +92,7 @@ fn invalid_config_replaces_the_entire_sidebar_with_its_error() {
     assert!(out.contains("config /tmp/reviewr/config.toml"));
     assert!(out.contains("expected a built-in theme name"));
     assert!(out.contains("The config reloads automatically."));
-    assert!(!out.contains("Changes"), "normal sidebar chrome must be hidden");
+    assert!(!out.contains("Changes"), "normal reviewr chrome must be hidden");
 }
 
 #[test]
@@ -122,6 +122,123 @@ fn the_caret_block_sits_on_the_character_at_the_caret() {
 }
 
 #[test]
+fn backspacing_a_wide_character_leaves_the_terminal_cursor_unpainted() {
+    let mut app = edited_app();
+    composing(&mut app);
+    app.input_push('日');
+    app.input_push('本');
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let before = terminal.backend().cursor_position();
+    app.input_backspace();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let cursor = terminal.backend().cursor_position();
+    assert_eq!(
+        (cursor.x + 2, cursor.y),
+        (before.x, before.y),
+        "the cursor retreats one wide character"
+    );
+    let cell = terminal.backend().buffer().cell(cursor).unwrap();
+    assert_eq!(cell.bg, ratatui::style::Color::Reset);
+    assert_eq!(cell.symbol(), " ");
+}
+
+#[test]
+fn the_base_picker_anchors_the_terminal_cursor_at_its_caret() {
+    let mut app = edited_app();
+    app.base_picker = Some(BasePicker {
+        rows: vec![BaseChoice { name: "main".to_string(), starred: false, is_default: true }],
+        cursor: 0,
+        query: String::new(),
+        caret: 0,
+    });
+    app.mode = Mode::BasePick;
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+    let empty = terminal.backend().cursor_position();
+
+    app.input_push('日');
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let after = terminal.backend().cursor_position();
+    assert_eq!(
+        (after.x, after.y),
+        (empty.x + 2, empty.y),
+        "the cursor advances one wide character"
+    );
+    let cell = terminal.backend().buffer().cell(after).unwrap();
+    assert_eq!(
+        cell.bg,
+        ratatui::style::Color::Reset,
+        "end of input leaves the cursor cell unpainted"
+    );
+}
+
+#[test]
+fn a_height_capped_composer_scrolls_to_keep_the_caret_visible() {
+    let mut app = edited_app();
+    composing(&mut app);
+    for _ in 0..599 {
+        app.input_push('x');
+    }
+    app.input_push('z'); // the unique last character locates the caret in the buffer
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let cursor = terminal.backend().cursor_position();
+    let (zx, zy) = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .find(|&(x, y)| buffer.cell((x, y)).unwrap().symbol() == "z")
+        .expect("the box scrolled the last typed character into view");
+    // The cursor sits where the next character lands: right after `z`, or on the first
+    // text column of the fresh row below when `z` exactly filled its row.
+    let inline = (cursor.x, cursor.y) == (zx + 1, zy);
+    let row_start =
+        (0..buffer.area.width).find(|&x| buffer.cell((x, zy)).unwrap().symbol() == "x").unwrap();
+    let wrapped = (cursor.x, cursor.y) == (row_start, zy + 1);
+    assert!(
+        inline || wrapped,
+        "the cursor sits after the text (cursor {cursor:?}, z at ({zx},{zy}))"
+    );
+    assert_eq!(
+        buffer.cell(cursor).unwrap().symbol(),
+        " ",
+        "end of input leaves the cursor cell blank"
+    );
+}
+
+#[test]
+fn the_find_band_anchors_the_terminal_cursor_at_its_caret() {
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("m.rs", "let total = 1;\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 140, 40);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), area, &keymap)
+        .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+    let empty = terminal.backend().cursor_position();
+
+    handle_key(&mut app, KeyEvent::from(KeyCode::Char('日')), area, &keymap).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let after = terminal.backend().cursor_position();
+    assert_eq!(
+        (after.x, after.y),
+        (empty.x + 2, empty.y),
+        "the cursor advances one wide character"
+    );
+}
+
+#[test]
 fn caret_vertical_moves_between_wrapped_rows() {
     // "abcdef" hard-wraps at width 3 to "abc"/"def"; caret 4 (def col 1) up → 1; 1 down → 4.
     assert_eq!(ui::caret_vertical("abcdef", 4, 3, false), 1);
@@ -129,10 +246,16 @@ fn caret_vertical_moves_between_wrapped_rows() {
     // Composer wrapping preserves repeated spaces so every caret index remains addressable.
     assert_eq!(ui::caret_vertical("ab  cd", 4, 2, false), 2);
     assert_eq!(ui::caret_vertical("ab  cd", 2, 2, true), 4);
+    // A line exactly filling the width adds no phantom row, so one step crosses it.
+    assert_eq!(ui::caret_vertical("abc\ndef", 0, 3, true), 4);
+    assert_eq!(ui::caret_vertical("abc\ndef", 4, 3, false), 0);
+    // The caret past the full line sits visually on the next row, and motion agrees.
+    assert_eq!(ui::caret_vertical("abc\ndef", 3, 3, false), 0);
+    assert_eq!(ui::caret_vertical("abc\ndef", 3, 3, true), 7);
 }
 
 #[test]
-fn the_fold_hint_names_the_arrow_key() {
+fn the_fold_hint_names_the_expand_binding() {
     use std::fmt::Write as _;
     let r = Repo::init();
     let mut body = String::new();
@@ -149,6 +272,15 @@ fn the_fold_hint_names_the_arrow_key() {
     let out = render(&app);
     assert!(out.contains("→ expand"), "the fold hint names the `→` key");
     assert!(!out.contains("⏎ expand"), "no stale enter hint remains");
+
+    // A rebound `expand` renames the fold row's inline label and the footer hint alike
+    // (`specs/input.md`: a hint shows the action's first bound key).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"x\"]\n").unwrap();
+    app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+    let out = render(&app);
+    assert!(out.contains("x expand"), "the rebound key names the hint:\n{out}");
+    assert!(!out.contains("→ expand"), "the freed arrow leaves the hint");
 }
 
 fn edited_app() -> App {
@@ -372,6 +504,42 @@ fn the_selected_file_row_fills_with_the_shared_selection_color() {
 }
 
 #[test]
+fn a_hidden_navigator_gives_the_read_pane_the_whole_body() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.next_hunk();
+    let cursor_y = 2 + app.diff_cursor as u16;
+    let fill = |app: &App| {
+        let buf = render_buffer(app);
+        (1..139u16)
+            .filter(|&x| buf.cell((x, cursor_y)).is_some_and(|c| c.bg == SELECTION_BG))
+            .count()
+    };
+    let visible_fill = fill(&app);
+    let out = render(&app);
+    assert!(!out.contains("z hide"), "visible and collapsed, the hide key waits under `?`");
+
+    app.toggle_navigator_hidden();
+    let hidden_fill = fill(&app);
+    assert!(
+        hidden_fill > visible_fill && hidden_fill > 120,
+        "the cursor row fills the whole body with surface2: {hidden_fill} vs {visible_fill}"
+    );
+    let out = render(&app);
+    assert!(out.contains("z show"), "the collapsed footer names the way back");
+
+    app.toggle_keys();
+    let out = render(&app);
+    assert!(out.contains("z show"), "row 1 keeps the way back in the expansion");
+    assert!(!out.contains("p position"), "`p position` drops while hidden");
+
+    app.toggle_navigator_hidden();
+    let out = render(&app);
+    assert!(out.contains("z hide"), "visible, the `go` band lists the hide key");
+    assert!(out.contains("p position"), "`p position` returns with the navigator");
+}
+
+#[test]
 fn shows_tab_bar_file_list_and_diff() {
     let app = edited_app();
     let out = render(&app);
@@ -515,14 +683,14 @@ fn a_status_too_long_to_paint_never_costs_the_row_the_actions_that_fit() {
 }
 
 #[test]
-fn the_footer_shows_the_sends_outcome_at_a_sidebar_width_by_yielding_the_cursor_actions() {
+fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_actions() {
     let mut app = edited_app();
     on_changed_line(&mut app);
     app.start_comment();
     app.input_push('n');
     app.submit_comment(); // a written comment adds `s send 1` to row 1
 
-    // The status is the only answer `s` gives, and a reviewr sidebar is around 40 columns wide, so
+    // The status is the only answer `s` gives, and a reviewr pane is around 40 columns wide, so
     // the cursor's actions yield to it: the `?` panel repeats every action and nothing repeats the
     // status (`specs/input.md`).
     app.status = "no agent here — copy to the clipboard instead".to_string();
@@ -831,27 +999,21 @@ fn the_box_is_inserted_under_the_selected_line() {
 const AREA: Rect = Rect { x: 0, y: 0, width: 140, height: 40 };
 
 #[test]
-fn header_clicks_map_to_scope_and_send() {
+fn header_clicks_map_to_the_scope_chip() {
     let app = edited_app(); // scope uncommitted, no comments
     // Scan the header row instead of hardcoding columns, so the test survives changes
-    // to the label/button text.
+    // to the label text.
     let scope: Vec<u16> = (0..AREA.width)
         .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Scope))
         .collect();
-    let send: Vec<u16> = (0..AREA.width)
-        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Send))
-        .collect();
 
     assert!(!scope.is_empty(), "scope chip is clickable");
-    assert!(!send.is_empty(), "send button is clickable");
-    assert!(scope.iter().max() < send.iter().min(), "scope is left of the button, no overlap");
-    assert!(*send.iter().max().unwrap() < AREA.width);
 
     let gap = scope.iter().max().unwrap() + 1;
     assert_eq!(
         ui::hit_header(AREA, &app, app.keymap(), gap, 0),
         None,
-        "the space between controls is inert"
+        "the space right of the chip is inert"
     );
     assert_eq!(
         ui::hit_header(AREA, &app, app.keymap(), scope[0], 5),
@@ -1113,15 +1275,43 @@ fn open_list_renders_the_comments_overlay() {
 }
 
 #[test]
-fn last_turn_without_a_baseline_renders_the_waiting_state() {
+fn last_turn_without_an_agent_says_the_worktree_is_empty() {
+    // `specs/herdr-host.md` owns when membership counts as observed; `specs/tui.md` owns the
+    // wording. Only a sample that found no member may say the worktree is empty.
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.reload().unwrap();
+    app.sync_agents_present(Some(false));
+    let out = render(&app);
+    assert!(out.contains("[last turn]"), "the scope chip reads last turn");
+    assert!(out.contains("no agent works here"), "the empty-worktree state shows");
+}
+
+#[test]
+fn last_turn_with_an_agent_and_no_turn_yet_waits_for_the_first() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.reload().unwrap();
+    app.sync_agents_present(Some(true));
+    let out = render(&app);
+    assert!(out.contains("waiting for the first turn"), "the pre-turn state shows");
+}
+
+#[test]
+fn last_turn_before_the_first_sample_waits_rather_than_asserting_emptiness() {
+    // The pre-poll frame has observed nothing, so it may wait but not claim the worktree
+    // is empty — stale is allowed, wrong is not (`specs/overview.md` Continuity).
     let r = Repo::init();
     r.write("a.rs", "a\n");
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
     app.reload().unwrap();
     let out = render(&app);
-    assert!(out.contains("[last turn]"), "the scope chip reads last turn");
-    assert!(out.contains("waiting for the agent's next turn"), "the cold-start empty state shows");
+    assert!(out.contains("waiting for the first turn"), "the unknown state waits");
 }
 
 #[test]
@@ -1136,7 +1326,7 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
 
     let out = render(&app);
     assert!(out.contains("1 Changes"), "tab labels carry their switch digit:\n{out}");
-    assert!(out.contains("2 All files"));
+    assert!(out.contains("2 Files"));
     assert!(
         out.contains("1 changed"),
         "the changed count stays in the header on All files:\n{out}"
@@ -1155,30 +1345,6 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
     let expanded = render(&app);
     assert!(expanded.contains("scope"), "the `?` expansion lists the scope keys:\n{expanded}");
     assert!(expanded.contains("move"), "and labels the movement band:\n{expanded}");
-}
-
-#[test]
-fn a_narrow_overflowing_header_does_not_mis_map_a_click_to_send() {
-    let r = Repo::init();
-    r.write("a.rs", "x\n");
-    r.commit_all("init");
-    r.write("a.rs", "y\n");
-    let app = app_on(&r);
-
-    // At a narrow sidebar width the two-tab header overflows and the Send button is off-screen.
-    // No on-screen column may map to Send — the old right-aligned hit-zone landed a phantom Send
-    // over the chip/tab region, swallowing those clicks as a Send.
-    let width: u16 = 34;
-    let area = Rect::new(0, 0, width, 40);
-    let phantom =
-        (0..width).any(|c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
-    assert!(!phantom, "no on-screen column mis-maps to Send when the narrow header overflows");
-
-    // At a wide width the Send button is right-aligned and clickable.
-    let wide = Rect::new(0, 0, 140, 40);
-    let send =
-        (0..140).any(|c| ui::hit_header(wide, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
-    assert!(send, "Send is clickable when the header fits");
 }
 
 #[test]
@@ -1224,12 +1390,12 @@ fn rebound_app(keybindings: &str) -> App {
 
 #[test]
 fn hints_show_the_first_bound_key() {
-    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"z\"]\n");
+    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"g\"]\n");
     let out = render(&app);
     let footer = footer_line(&out);
     // A wide hint key spans two buffer cells, so the dump carries a placeholder space after it.
     assert!(footer.contains("ㅊ  comment"), "the hint is the first bound key:\n{footer}");
-    assert!(out.contains("z PR"), "the header tab hint follows its binding:\n{out}");
+    assert!(out.contains("g PR"), "the header tab hint follows its binding:\n{out}");
     assert!(!out.contains("3 PR"), "the replaced digit is gone:\n{out}");
 }
 
@@ -1267,8 +1433,7 @@ fn header_tab_hits_align_with_wide_hint_keys() {
     let row0 = out.lines().next().unwrap().to_string();
     let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
     let area = Rect::new(0, 0, 140, 40);
-    for (needle, tab) in
-        [("Changes", Tab::Changes), ("2 All files", Tab::AllFiles), ("3 PR", Tab::Pr)]
+    for (needle, tab) in [("Changes", Tab::Changes), ("2 Files", Tab::AllFiles), ("3 PR", Tab::Pr)]
     {
         assert_eq!(
             ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),
@@ -1330,11 +1495,16 @@ fn pr_bodies_render_as_markdown_and_the_description_row_pins_first() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::Pr).unwrap();
+    let place = herdr_reviewr::forge::FindingPlace::from_anchor(
+        "x.rs:1",
+        Some(herdr_reviewr::model::Side::New),
+    );
     let finding = Comment {
         kind: CommentKind::Finding,
         author: "codex".into(),
         author_is_bot: true,
-        anchor: "x.rs:1".into(),
+        anchor: place.anchor(),
+        place: Some(place),
         body: "Avoid **panics** in `parse`.".into(),
         snippet: Some("-    old\n+    new".into()),
         ..common::comment()
@@ -1360,12 +1530,93 @@ fn pr_bodies_render_as_markdown_and_the_description_row_pins_first() {
     let comments_at = nav.find("comments ·").expect("comments header in the nav");
     assert!(desc_at < checks_at && checks_at < comments_at, "nav order:\n{nav}");
 
-    // The finding: the snippet stays plain +/− lines, the body renders as markdown.
+    // The finding: the snippet paints as Diff-view rows, the body renders as markdown.
     app.pr_move(1);
     let out = render(&app);
-    assert!(out.contains("+    new"), "the diff hunk stays plain:\n{out}");
+    assert!(out.contains("old"), "the deletion row paints:\n{out}");
+    assert!(out.contains("new"), "the insertion row paints:\n{out}");
+    assert!(!out.contains("+    new"), "the hunk is not raw +/- text:\n{out}");
     assert!(out.contains("Avoid panics in parse."), "the body renders styled:\n{out}");
     assert!(!out.contains("**panics**"), "markers are consumed:\n{out}");
+}
+
+#[test]
+fn a_finding_range_paints_as_diff_rows() {
+    use herdr_reviewr::forge::{Comment, CommentKind, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    let hunk = format!(
+        concat!(
+            "@@ -16,10 +16,10 @@\n",
+            " OUT_ABOVE\n",
+            " a\n",
+            " b\n",
+            " c\n",
+            " ctx\n",
+            "-    let x = foo(a);\n",
+            "+    let x = bar(a); SNIP_HEAD{}SNIP_TAIL\n",
+            " tail\n",
+            " d\n",
+            " e\n",
+            " OUT_BELOW\n",
+        ),
+        "x".repeat(80),
+    );
+    let finding = |anchor: &str, body: &str| {
+        let place = herdr_reviewr::forge::FindingPlace::from_anchor(
+            anchor,
+            Some(herdr_reviewr::model::Side::New),
+        );
+        Comment {
+            kind: CommentKind::Finding,
+            author: "codex".into(),
+            author_is_bot: true,
+            anchor: place.anchor(),
+            place: Some(place),
+            body: body.into(),
+            snippet: Some(hunk.clone()),
+            ..common::comment()
+        }
+    };
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![finding("x.rs:21", "keep this"), finding("x.rs:16", "second finding")],
+        ..common::pr_snapshot()
+    }));
+    app.wrap = false;
+    let out = render(&app);
+    // The nav label is `x.rs:21`; the gutter must also paint in the read pane.
+    let read = out
+        .lines()
+        .map(|l| l.chars().take(l.chars().count() * 68 / 100).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        read.lines().any(|l| l.contains("21") && l.contains("foo")),
+        "the gutter 21 sits on the deletion row:\n{read}"
+    );
+    assert!(out.contains("foo"), "the deletion in range paints:\n{out}");
+    assert!(out.contains("bar"), "the insertion in range paints:\n{out}");
+    assert!(out.contains("SNIP_TAIL"), "the snippet wraps even when wrap is off:\n{out}");
+    assert!(out.contains("ctx") && out.contains("tail"), "the three-line margin paints:\n{out}");
+    assert!(!out.contains("OUT_ABOVE"), "context beyond the margin is omitted:\n{out}");
+    assert!(!out.contains("OUT_BELOW"), "following context beyond the margin is omitted:\n{out}");
+    assert!(!out.contains("@@"), "the hunk header does not paint:\n{out}");
+    assert!(
+        out.contains("Comment on line +21"),
+        "an insertion in the range keeps the + sign:\n{out}"
+    );
+    assert!(out.contains("keep this"), "the body follows the range:\n{out}");
+
+    app.pr_move(1);
+    let out = render(&app);
+    assert!(out.contains("Comment on line 16"), "a context range has no sign:\n{out}");
+    assert!(out.contains("OUT_ABOVE"), "the other finding's range paints:\n{out}");
+    assert!(!out.contains("foo"), "the first finding's deletion does not linger:\n{out}");
+    assert!(!out.contains("bar"), "the first finding's insertion does not linger:\n{out}");
+    assert!(out.contains("second finding"), "the selected body follows its range:\n{out}");
 }
 
 #[test]
@@ -1866,6 +2117,10 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
             author: "codex".into(),
             author_is_bot: true,
             anchor: "x.rs:1".into(),
+            place: Some(herdr_reviewr::forge::FindingPlace::from_anchor(
+                "x.rs:1",
+                Some(herdr_reviewr::model::Side::New),
+            )),
             body,
             snippet: Some("-    old\n+    new".into()),
             ..common::comment()
@@ -1873,14 +2128,14 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
         ..common::pr_snapshot()
     }));
     let out = render(&app);
-    assert!(out.contains("+    new"), "the snippet paints above the body:\n{out}");
+    assert!(out.contains("new"), "the snippet paints above the body:\n{out}");
 
     // The anchor stores its content line snippet-offset included, so the jump lands on
     // the heading, scrolling the snippet and the body's top out of view.
     app.open_link("#target");
     let out = render(&app);
     assert!(out.contains("Target"), "the heading is on screen:\n{out}");
-    assert!(!out.contains("+    new"), "the snippet scrolled away:\n{out}");
+    assert!(!out.contains("new"), "the snippet scrolled away:\n{out}");
     assert!(!out.contains("jump go"), "the body's top scrolled away:\n{out}");
 }
 
@@ -1949,6 +2204,28 @@ mod search_screen_render {
     fn land(app: &mut App, results: SearchResults) {
         let completion = SearchCompletion { generation: 1, outcome: SearchOutcome::Ready(results) };
         land_search_completion(app, completion, 1);
+    }
+
+    #[test]
+    fn the_band_anchors_the_terminal_cursor_at_its_caret() {
+        let repo = Repo::init();
+        repo.write("src/registry.rs", "fn resolve() {}\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| ui::render(f, &app)).unwrap();
+        let empty = terminal.backend().cursor_position();
+
+        key(&mut app, KeyCode::Char('日'));
+        terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+        let after = terminal.backend().cursor_position();
+        assert_eq!(
+            (after.x, after.y),
+            (empty.x + 2, empty.y),
+            "the cursor advances one wide character"
+        );
     }
 
     #[test]
@@ -2527,14 +2804,11 @@ fn picker_app() -> App {
     for text in ["one", "two", "three"] {
         write_comment(&mut app, text);
     }
-    app.open_picker(
-        vec![
-            agent_row("w8:p1", "claude", "idle", "Grip Outreach"),
-            agent_row("w8:p2", "release-bot", "idle", "Grip Outreach Campaign"),
-            agent_row("w8:p3", "codex", "working", "3"),
-        ],
-        None,
-    );
+    app.open_picker(vec![
+        agent_row("w8:p1", "claude", "idle", "Grip Outreach"),
+        agent_row("w8:p2", "release-bot", "idle", "Grip Outreach Campaign"),
+        agent_row("w8:p3", "codex", "working", "3"),
+    ]);
     app
 }
 
@@ -2545,13 +2819,10 @@ fn the_last_sent_row_carries_its_tag_and_no_other_row_does() {
     // A prior send to release-bot arms the highlight there and tags the row, so the
     // remembered default reads before `enter` fires it (specs/herdr-host.md).
     app.last_sent_pane = Some("w8:p2".to_string());
-    app.open_picker(
-        vec![
-            agent_row("w8:p1", "claude", "idle", "1"),
-            agent_row("w8:p2", "release-bot", "idle", "2"),
-        ],
-        None,
-    );
+    app.open_picker(vec![
+        agent_row("w8:p1", "claude", "idle", "1"),
+        agent_row("w8:p2", "release-bot", "idle", "2"),
+    ]);
     assert_eq!(app.picker_cursor, 1, "the highlight arms on the last-sent agent");
     let out = render(&app);
 
@@ -2566,10 +2837,10 @@ fn an_open_picker_dims_the_view_behind_it_but_never_the_footer() {
     let mut app = edited_app();
     write_comment(&mut app, "one");
     let plain = render_buffer(&app);
-    app.open_picker(
-        vec![agent_row("w8:p1", "claude", "idle", "1"), agent_row("w8:p2", "codex", "idle", "2")],
-        None,
-    );
+    app.open_picker(vec![
+        agent_row("w8:p1", "claude", "idle", "1"),
+        agent_row("w8:p2", "codex", "idle", "2"),
+    ]);
     let dimmed = render_buffer(&app);
 
     // The tab bar recedes toward the theme base while the picker is up (specs/tui.md).
@@ -2611,7 +2882,7 @@ fn neither_popup_reaches_the_footer_that_advertises_its_keys() {
         app.open_list();
         let listed = dump(&render_size(&app, 44, h));
         app.close_list();
-        app.open_picker(rows.clone(), None);
+        app.open_picker(rows.clone());
         let picked = dump(&render_size(&app, 44, h));
         app.close_picker();
 
@@ -2657,7 +2928,7 @@ fn the_picker_numbers_only_the_rows_a_digit_key_can_reach() {
     let rows: Vec<AgentChoice> = (1..=11)
         .map(|i| agent_row(&format!("w8:p{i}"), &format!("agent{i}"), "idle", "1"))
         .collect();
-    app.open_picker(rows, None);
+    app.open_picker(rows);
     let out = render(&app);
 
     for i in 1..=9 {
@@ -2676,7 +2947,7 @@ fn a_picker_taller_than_the_pane_scrolls_to_keep_the_highlight_visible() {
     let rows: Vec<AgentChoice> = (1..=20)
         .map(|i| agent_row(&format!("w8:p{i}"), &format!("agent{i}"), "idle", "1"))
         .collect();
-    app.open_picker(rows, None);
+    app.open_picker(rows);
 
     // A short frame cannot show twenty rows; the last one is still reachable.
     let short = dump(&render_size(&app, 80, 12));
@@ -2725,4 +2996,179 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     )
     .unwrap();
     assert_eq!(app.picker_cursor, 2, "a click moves the highlight to the clicked row");
+}
+
+// --- Header base label (specs/tui.md) ------------------------------------------------------
+
+/// A repo on branch `feature` past `main`, with `origin/HEAD` naming `main` the default.
+/// The repo rides along: opening the picker shells out to git at click time.
+fn based_app() -> (Repo, App) {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["branch", "dev"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    (r, app)
+}
+
+#[test]
+fn the_branch_header_names_the_base_and_its_click_opens_the_picker() {
+    let (_repo, mut app) = based_app();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "the bare base name follows the scope: {line0}");
+
+    let base: Vec<u16> = (0..AREA.width)
+        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
+        .collect();
+    assert!(!base.is_empty(), "the base label is clickable");
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left),
+        column: base[0],
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    let keymap = app.keymap().clone();
+    handle_mouse(&mut app, click, AREA, &[], &keymap).unwrap();
+    let frame = render(&app);
+    assert!(frame.contains("Pick base"), "the click opens the picker popup");
+    assert!(frame.contains("dev"), "the sibling branch is a row");
+    assert!(frame.contains("default"), "the default branch is marked");
+}
+
+#[test]
+fn a_skipped_pick_warns_beside_the_resolved_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs main · gone missing"), "the dormant pick reads as skipped: {line0}");
+}
+
+#[test]
+fn without_a_resolving_base_the_header_reads_no_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let frame = render(&app);
+    let line0 = frame.lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] no base"), "the empty state is named: {line0}");
+    assert!(frame.contains("pick base"), "the footer advertises the picker");
+}
+
+#[test]
+fn a_dormant_pick_shows_beside_the_empty_state() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(
+        line0.contains("no base · gone missing"),
+        "a dormant choice never reads as never-chosen: {line0}"
+    );
+}
+
+#[test]
+fn an_overlong_base_name_truncates_with_an_ellipsis() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let long = format!("feature/{}", "x".repeat(80));
+    r.git(&["branch", &long]);
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs feature/x"), "the name paints up to the fit: {line0}");
+    assert!(line0.contains('…'), "the overflow truncates with a trailing ellipsis: {line0}");
+    assert!(line0.contains("1 changed"), "the right-aligned stats survive the long name: {line0}");
+}
+
+#[test]
+fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let long = format!("feature/{}", "x".repeat(60));
+    r.git(&["branch", &long]);
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+
+    // The base label truncates to its budget at a narrow width, and the hit test walks the
+    // same arithmetic the paint does: every column it claims carries painted label, and the
+    // claim is one unbroken run (specs/tui.md).
+    for width in [40u16, 56, 72] {
+        let area = Rect { x: 0, y: 0, width, height: 12 };
+        let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
+        let cells: Vec<char> = line0.chars().collect();
+        let hits: Vec<u16> = (0..width)
+            .filter(|&c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
+            .collect();
+        let Some((&first, &last)) = hits.first().zip(hits.last()) else {
+            // Too narrow for even one column of the name: the base left the header whole,
+            // so nothing paints a nameless `vs` and nothing claims it (specs/tui.md).
+            assert!(!line0.contains("vs"), "width {width}: a nameless `vs` paints: {line0}");
+            assert!(line0.contains("[branch]"), "width {width}: the scope survives: {line0}");
+            continue;
+        };
+        assert_eq!(
+            hits.len() as u16,
+            last - first + 1,
+            "width {width}: the base claims one unbroken run"
+        );
+        let claimed: String = hits.iter().map(|&c| cells[c as usize]).collect();
+        assert_ne!(claimed.trim(), "vs", "width {width}: a nameless `vs` is claimed: {line0}");
+        assert!(
+            !claimed.ends_with(' '),
+            "width {width}: the claim runs past the painted label: {line0}"
+        );
+        assert_eq!(
+            cells.get(last as usize + 1).copied(),
+            Some(' '),
+            "width {width}: the claim stops short of the painted label: {line0}"
+        );
+    }
+}
+
+#[test]
+fn an_overlong_skipped_tail_never_evicts_the_base_name() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    let long = format!("feature/{}", "x".repeat(80));
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs main"), "the resolved name keeps first claim: {line0}");
+    assert!(line0.contains("· feature/x"), "the skipped tail paints in what remains: {line0}");
+    assert!(line0.contains('…'), "the tail truncates with a trailing ellipsis: {line0}");
+    assert!(line0.contains("1 changed"), "the right-aligned stats survive the long tail: {line0}");
 }

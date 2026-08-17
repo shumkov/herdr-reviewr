@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-18
-Last edited: 2026-07-20
+Last edited: 2026-08-08
 ---
 
 # Search
@@ -14,7 +14,7 @@ Full-screen file and code search over the worktree, opened with `/` from any tab
 above a full-width live preview. `tab` flips between the two search modes, keeping the query.
 
 ```
-┌ 1 Changes  2 All files  3 PR  [uncommitted]                                  ┐
+┌ 1 Changes  2 Files  3 PR  [uncommitted]                                      ┐
 │ > registry resolve█                                       files 3 │ code 37+ │
 │ ┌ results ────────────────────────────────────────────────────────────────┐ │
 │ │ src/llm_registry.py                                                     │ │
@@ -62,8 +62,8 @@ results.
 - A titled rule tops each pane: `results`, and `preview` with the file.
 - The results pane takes half the body by default. Dragging the divider changes the share,
   bounded by the minimum pane sizes (`tui.md`). The share is search's own session value —
-  the review layout's shares are untouched, and the position and resize keys are printable
-  here. A drag cancels by `input.md`'s divider rules.
+  the review layout's shares are untouched, and the position, hide, and resize keys are
+  printable here. A drag cancels by `input.md`'s divider rules.
 - At tiny sizes the input band keeps its one row and the panes divide the rest
   (`tui.md` minimum sizes).
 - The screen opens in `Files` mode. `tab` flips the mode, keeping the query, and paints

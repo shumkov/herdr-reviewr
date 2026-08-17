@@ -17,6 +17,9 @@ pub struct Config {
     pub theme: Option<String>,
     /// `Some(false)` when `--wrap off` is passed; `None` keeps the default (wrap on).
     pub wrap: Option<bool>,
+    /// The plugin config directory, resolved once at startup by [`resolve_config_dir`];
+    /// every later config read rereads only the file inside it (`specs/config.md`).
+    pub plugin_config_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -47,7 +50,14 @@ impl Config {
         }
         let repo =
             repo.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-        Self { repo, poll: Duration::from_millis(poll_ms.max(200)), base, theme, wrap }
+        Self {
+            repo,
+            poll: Duration::from_millis(poll_ms.max(200)),
+            base,
+            theme,
+            wrap,
+            plugin_config_dir: None,
+        }
     }
 
     /// Parse from the real process arguments.
@@ -56,24 +66,8 @@ impl Config {
     }
 }
 
-/// The built-in base-branch candidates for the `branch` scope, used when `config.toml`
-/// sets no `base_branches` (`specs/review-model.md`).
-pub const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
-
-/// One `base_branches` entry's canonical bare branch name: a leading `refs/heads/`,
-/// `refs/remotes/origin/`, or `origin/` prefix is stripped (`specs/config.md`).
-pub(crate) fn canonical_base(entry: &str) -> String {
-    entry
-        .strip_prefix("refs/remotes/origin/")
-        .or_else(|| entry.strip_prefix("refs/heads/"))
-        .or_else(|| entry.strip_prefix("origin/"))
-        .unwrap_or(entry)
-        .to_string()
-}
-
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 10] = [
     "theme",
-    "base_branches",
     "default_scope",
     "navigator_position",
     "toggle_placement",
@@ -123,7 +117,7 @@ impl NavigatorPosition {
     }
 }
 
-/// Where the toggle action opens the sidebar.
+/// Where the toggle action opens the reviewr pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TogglePlacement {
     Split,
@@ -159,11 +153,10 @@ impl ToggleDirection {
     }
 }
 
-/// One validated snapshot of `$HERDR_PLUGIN_CONFIG_DIR/config.toml`.
+/// One validated snapshot of `config.toml` in the resolved config directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfig {
     theme: String,
-    base_branches: Vec<String>,
     default_scope: crate::model::Scope,
     navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
@@ -179,7 +172,6 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             theme: crate::theme::DEFAULT.to_owned(),
-            base_branches: DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect(),
             default_scope: crate::model::Scope::Uncommitted,
             navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
@@ -198,12 +190,8 @@ impl PluginConfig {
         &self.theme
     }
 
-    pub fn base_branches(&self) -> &[String] {
-        &self.base_branches
-    }
-
-    /// The scope a fresh sidebar is built with — startup and config recovery. A reread never
-    /// switches a running sidebar's scope (specs/review-model.md).
+    /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
+    /// switches a running pane's scope (specs/review-model.md).
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
     }
@@ -263,7 +251,6 @@ impl PluginConfig {
             .collect();
         serde_json::json!({
             "theme": self.theme,
-            "base_branches": self.base_branches,
             "default_scope": self.default_scope.name(),
             "navigator_position": self.navigator_position.as_str(),
             "toggle_placement": self.toggle_placement.as_str(),
@@ -299,13 +286,32 @@ impl fmt::Display for PluginConfigError {
 
 impl std::error::Error for PluginConfigError {}
 
-/// Read one plugin config snapshot from the process environment. An unset config directory is
-/// standalone mode and uses defaults; a configured directory always names `config.toml`.
-pub fn plugin_config() -> Result<PluginConfig, PluginConfigError> {
-    let Some(dir) = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR") else {
-        return Ok(PluginConfig::default());
-    };
-    plugin_config_in(dir)
+/// The config directory, resolved once at an entrypoint's startup (`specs/config.md`):
+/// `$HERDR_PLUGIN_CONFIG_DIR` when set, else the directory `cli` reports
+/// ([`crate::herdr::plugin_config_dir`]), else none — and none reads no config file.
+pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBuf> {
+    config_dir_from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
+}
+
+/// The resolution rule behind [`resolve_config_dir`], split out so tests can inject both
+/// inputs. An empty value names no directory on either branch — otherwise an empty env var
+/// would read `./config.toml` from the repo under review and block the pane on it.
+fn config_dir_from(
+    env: Option<std::ffi::OsString>,
+    cli: impl FnOnce() -> Option<String>,
+) -> Option<PathBuf> {
+    env.filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| cli().filter(|dir| !dir.is_empty()).map(PathBuf::from))
+}
+
+/// Read one plugin config snapshot from the resolved config directory. No directory reads no
+/// config file, which is the missing-file outcome and uses every default (`specs/config.md`).
+pub fn plugin_config(dir: Option<&Path>) -> Result<PluginConfig, PluginConfigError> {
+    match dir {
+        Some(dir) => plugin_config_in(dir),
+        None => Ok(PluginConfig::default()),
+    }
 }
 
 /// Read one plugin config snapshot from `<dir>/config.toml`.
@@ -338,44 +344,6 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             ));
         }
         theme.clone_into(&mut config.theme);
-    }
-    if let Some(value) = table.get("base_branches") {
-        let Some(values) = value.as_array() else {
-            return Err(value_error(
-                path,
-                "base_branches",
-                "a non-empty array of non-empty strings",
-            ));
-        };
-        if values.is_empty() {
-            return Err(value_error(
-                path,
-                "base_branches",
-                "a non-empty array of non-empty strings",
-            ));
-        }
-        let mut branches = Vec::with_capacity(values.len());
-        for value in values {
-            let Some(branch) = value.as_str() else {
-                return Err(value_error(
-                    path,
-                    "base_branches",
-                    "a non-empty array of non-empty strings",
-                ));
-            };
-            if !valid_ref_name(branch) {
-                return Err(value_error(
-                    path,
-                    "base_branches",
-                    "a non-empty array of Git ref names",
-                ));
-            }
-            let canonical = canonical_base(branch);
-            if !branches.contains(&canonical) {
-                branches.push(canonical);
-            }
-        }
-        config.base_branches = branches;
     }
     if let Some(value) = table.get("default_scope") {
         config.default_scope = match string_value(
@@ -484,11 +452,12 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character, or a
-/// character behind a `ctrl+`/`alt+` prefix (`specs/config.md`). The character is
+/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
+/// named key, alone or behind a `ctrl+`/`alt+` prefix (`specs/config.md`). The character is
 /// one visible cell — a positive display width also rejects the zero-width class `is_control`
 /// misses (format chars, combining marks).
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
+    use crate::keymap::KeyCode;
     let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
         (true, false, rest)
     } else if let Some(rest) = text.strip_prefix("alt+") {
@@ -496,13 +465,16 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     } else {
         (false, false, text)
     };
+    if let Some(code) = KeyCode::by_name(rest) {
+        return Some(crate::keymap::Key { ctrl, alt, code });
+    }
     let mut it = rest.chars();
     match (it.next(), it.next()) {
         (Some(ch), None)
             if !ch.is_whitespace()
                 && unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > 0 =>
         {
-            Some(crate::keymap::Key { ctrl, alt, ch })
+            Some(crate::keymap::Key { ctrl, alt, code: KeyCode::Char(ch) })
         }
         _ => None,
     }
@@ -521,6 +493,11 @@ fn parse_keybindings(
     };
     let mut overrides = Vec::with_capacity(entries.len());
     let mut names_by_action = Vec::with_capacity(entries.len());
+    // Loop-invariant, and this parse runs per frame (`CFG-*` snapshots): build it once.
+    let expected = format!(
+        "a non-empty array of keys, each a character or a named key ({}), alone or behind ctrl+/alt+",
+        crate::keymap::KeyCode::names().collect::<Vec<_>>().join(", ")
+    );
     for (name, keys) in entries {
         let Some(action) = Action::by_config_name(name) else {
             return Err(unknown_key_error(
@@ -541,7 +518,7 @@ fn parse_keybindings(
         }
         names_by_action.push((action, name.as_str()));
         let entry_key = format!("keybindings.{name}");
-        let expected = "a non-empty array of keys, each a character or a ctrl+/alt+ chord";
+        let expected = expected.as_str();
         let Some(values) = keys.as_array() else {
             return Err(value_error(path, &entry_key, expected));
         };
@@ -619,37 +596,21 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Git's `check-ref-format --allow-onelevel` rules, used without spawning Git from the shared
-/// configuration boundary. Base entries are names, not revision expressions.
-fn valid_ref_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "@"
-        && !name.starts_with('-')
-        && !name.starts_with('/')
-        && !name.ends_with('/')
-        && !name.ends_with('.')
-        && !name.contains("//")
-        && !name.contains("..")
-        && !name.contains("@{")
-        && name
-            .split('/')
-            .all(|part| !part.starts_with('.') && part.strip_suffix(".lock").is_none())
-        && name.bytes().all(|byte| {
-            byte > b' '
-                && byte != 0x7f
-                && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
-        })
-}
-
-/// Print the shared normalized configuration for `herdr/sidebar.sh`.
+/// Print the shared normalized configuration for the plugin action script. This is its own
+/// entrypoint (`--resolve-plugin-config`), so it resolves the config directory itself — and
+/// initializes the log itself, or the herdr-side diagnostics of a failed lookup would be
+/// dropped on the one path that exercises the CLI fallback from a plain shell.
 pub fn print_plugin_config() -> Result<(), PluginConfigError> {
-    println!("{}", plugin_config()?.to_json());
+    crate::log::init();
+    let dir = resolve_config_dir(crate::herdr::plugin_config_dir);
+    println!("{}", plugin_config(dir.as_deref())?.to_json());
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Config, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement};
+    use crate::keymap::KeyCode;
     use crate::model::Scope;
     use std::time::Duration;
 
@@ -679,6 +640,31 @@ mod tests {
     }
 
     #[test]
+    fn config_dir_prefers_the_env_and_falls_back_to_the_cli() {
+        use std::path::PathBuf;
+        // Env set: the CLI is never asked.
+        let dir =
+            super::config_dir_from(Some("/tmp/cfg".into()), || panic!("cli asked despite the env"));
+        assert_eq!(dir, Some(PathBuf::from("/tmp/cfg")));
+        // Env unset: the CLI's directory is used. An empty env value names no directory
+        // and falls through the same way.
+        let dir = super::config_dir_from(None, || Some("/tmp/from-cli".to_string()));
+        assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
+        let dir = super::config_dir_from(Some("".into()), || Some("/tmp/from-cli".to_string()));
+        assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
+        // An empty CLI answer names no directory either — `PathBuf::from("")` would read
+        // `./config.toml` from the repo under review.
+        assert_eq!(super::config_dir_from(None, || Some(String::new())), None);
+        // Neither resolves — herdr absent or refusing: no config directory.
+        assert_eq!(super::config_dir_from(None, || None), None);
+    }
+
+    #[test]
+    fn no_config_directory_reads_no_file_and_uses_defaults() {
+        assert_eq!(super::plugin_config(None).unwrap(), PluginConfig::default());
+    }
+
+    #[test]
     fn missing_file_uses_all_defaults() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(super::plugin_config_in(dir.path()).unwrap(), PluginConfig::default());
@@ -690,7 +676,6 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "gruvbox");
-        assert_eq!(config.base_branches(), PluginConfig::default().base_branches());
         assert_eq!(config.default_scope(), Scope::Uncommitted);
         assert_eq!(config.navigator_position(), NavigatorPosition::Right);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
@@ -706,7 +691,6 @@ mod tests {
             dir.path().join("config.toml"),
             concat!(
                 "theme = \"tokyo-night\"\n",
-                "base_branches = [\"origin/dev\", \"main\"]\n",
                 "default_scope = \"last-turn\"\n",
                 "navigator_position = \"bottom\"\n",
                 "toggle_placement = \"overlay\"\n",
@@ -718,30 +702,12 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
-        // Entries canonicalize to bare names at validation (`specs/config.md`).
-        assert_eq!(config.base_branches(), ["dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
-    }
-
-    #[test]
-    fn base_entries_canonicalize_and_duplicates_collapse_to_the_first() {
-        assert_eq!(super::canonical_base("origin/main"), "main");
-        assert_eq!(super::canonical_base("refs/heads/main"), "main");
-        assert_eq!(super::canonical_base("refs/remotes/origin/main"), "main");
-        assert_eq!(super::canonical_base("release/1.0"), "release/1.0");
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("config.toml"),
-            "base_branches = [\"origin/main\", \"main\", \"refs/heads/master\"]\n",
-        )
-        .unwrap();
-        let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.base_branches(), ["main", "master"]);
     }
 
     #[test]
@@ -753,6 +719,12 @@ mod tests {
         assert!(error.contains(path.to_str().unwrap()));
         assert!(error.contains("unknown key \"poll\""));
 
+        // The retired `base_branches` key fails like any unknown key: the base is a picked,
+        // per-repo choice now, never configuration (`specs/config.md`, `specs/review-model.md`).
+        std::fs::write(&path, "base_branches = [\"dev\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("unknown key \"base_branches\""));
+
         std::fs::write(&path, "theme = [\n").unwrap();
         assert!(
             super::plugin_config_in(dir.path()).unwrap_err().to_string().contains("syntax error")
@@ -763,12 +735,6 @@ mod tests {
     fn every_invalid_value_fails_instead_of_falling_back() {
         let cases = [
             ("theme = \"unknown\"\n", "`theme`"),
-            ("base_branches = []\n", "`base_branches`"),
-            ("base_branches = [\"\"]\n", "`base_branches`"),
-            ("base_branches = [\"main^{commit}\"]\n", "`base_branches`"),
-            ("base_branches = [\"feature branch\"]\n", "`base_branches`"),
-            ("base_branches = [\"-main\"]\n", "`base_branches`"),
-            ("base_branches = [\"main\", 1]\n", "`base_branches`"),
             ("default_scope = \"weekly\"\n", "`default_scope`"),
             ("default_scope = \"last turn\"\n", "`default_scope`"),
             ("navigator_position = \"center\"\n", "`navigator_position`"),
@@ -892,7 +858,7 @@ mod tests {
         std::fs::write(&path, "[keybindings]\nfind = [\"alt+x\"]\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(
-            config.keymap().action_for(Key { ctrl: false, alt: true, ch: 'x' }),
+            config.keymap().action_for(Key { ctrl: false, alt: true, code: KeyCode::Char('x') }),
             Some(Action::Find)
         );
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);
@@ -903,6 +869,49 @@ mod tests {
         std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("`keybindings.find`") && error.contains("expected"), "{error}");
+    }
+
+    #[test]
+    fn named_keys_bind_spell_by_name_and_round_trip() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[keybindings]\ncollapse = [\"h\", \"left\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::Collapse));
+        assert_eq!(config.keymap().action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
+        let json = config.to_json();
+        assert_eq!(json["keybindings"]["collapse"], serde_json::json!(["h", "left"]));
+        assert_eq!(json["keybindings"]["expand"], serde_json::json!(["right"]));
+        assert_eq!(json["keybindings"]["down"], serde_json::json!(["j", "down"]));
+        assert_eq!(json["keybindings"]["half-up"], serde_json::json!(["ctrl+u"]));
+
+        // The resolved output re-parses: every emitted spelling is valid config grammar.
+        let resolved = json["keybindings"].as_object().unwrap().clone();
+        let toml: String = std::iter::once("[keybindings]\n".to_string())
+            .chain(resolved.iter().map(|(action, keys)| format!("{action} = {keys}\n")))
+            .collect();
+        std::fs::write(&path, toml).unwrap();
+        let reparsed = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(reparsed.to_json()["keybindings"], json["keybindings"]);
+
+        // The display spelling of a named key is not the config spelling.
+        std::fs::write(&path, "[keybindings]\npage-up = [\"PageUp\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`keybindings.page-up`") && error.contains("pageup"), "{error}");
+    }
+
+    #[test]
+    fn a_rebind_colliding_with_a_default_names_both_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"l\"]\n")
+            .unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("`expand`") && error.contains("`comments`") && error.contains('l'),
+            "{error}"
+        );
     }
 
     #[test]

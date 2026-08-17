@@ -6,10 +6,152 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-08-17
+
+### Added
+- **Every key rebindable.** The arrows and page keys are now ordinary defaults of six new
+  actions in `[keybindings]`: `expand`, `collapse`, `page-up`, `page-down`, `half-up`, and
+  `half-down`. Named keys spell as `left`, `right`, `up`, `down`, `pageup`, and `pagedown`
+  in the config, so a vim-style `expand = ["l"]` with `collapse = ["h"]` works. Only `tab`,
+  `esc`, and `enter` stay fixed. Thanks to @dferland1 for driving this in #68.
+
+### Changed
+- **A rebind now replaces the arrow defaults too.** A config that already rebinds `down` or
+  `up` frees the `↓`/`↑` arrows on upgrade. Add `"down"` / `"up"` to those key lists to keep
+  them.
+- **A held modifier makes an arrow or page key its own key.** `ctrl+↓` no longer acts as
+  plain `↓`. Bind `ctrl+down` (or any `ctrl+`/`alt+` named key) explicitly to use it.
+
+## [0.31.0] — 2026-08-15
+
+### Added
+- **PR finding quotes.** A GitHub review comment with a stored hunk paints the comment's
+  line range as Diff-view rows: syntax highlight, add/delete tints, line numbers, wrap, and
+  word emphasis. The window is the range plus three stored lines above and below. The
+  navigator shows `path:start-end` when the ends differ, and the read pane captions the
+  range (`Comment on lines +1618 to +1622`). Peach marks the comment subject only.
+
+### Changed
+- **Finding ranges keep the forge side.** GitHub `diffSide`, GitLab `line_range.type`, and
+  Azure left/right fields pick old vs new. A minus caption is an old-side comment; a plus
+  caption is a new-side insertion. GitLab and Azure findings still have no snippet.
+
+## [0.30.4] — 2026-08-13
+
+### Changed
+- **A split open takes the keyboard.** Toggle and open focus reviewr in every placement,
+  including split. A new worktree still never steals focus
+  ([#61](https://github.com/persiyanov/herdr-reviewr/issues/61)).
+
+## [0.30.3] — 2026-08-13
+
 ### Fixed
-- A `tab`-placement open now names its fresh tab `reviewr` instead of leaving the bare
-  numeric label herdr assigns to new tabs. The rename is best-effort: when it fails, or an
-  older herdr omits `tab_id` from the pane-open result, the open still succeeds.
+- **Input IME anchoring.** The terminal cursor follows the comment, search, find, and base-picker
+  insertion points using display-cell widths, keeping CJK IME candidate windows at the input
+  position and avoiding a trailing caret ghost after Backspace deletes a wide character. Thanks
+  [@tomotochi](https://github.com/tomotochi) ([#55](https://github.com/persiyanov/herdr-reviewr/pull/55)).
+- **Comment box caret room.** A comment box too short for its text scrolls to keep the caret row
+  visible, and a comment ending on an exactly-full row grows the box by the empty row the caret
+  waits on.
+
+## [0.30.2] — 2026-08-12
+
+### Fixed
+- **Opening beside a worktree agent.** Opening reviewr next to a pane running `claude -w <worktree>` now reviews the worktree's branch, not the main checkout's. The open follows where the pane's program actually is and falls back to the pane's starting directory when that place is not a git repo. Thanks [@KyongSik-Yoon](https://github.com/KyongSik-Yoon) ([#59](https://github.com/persiyanov/herdr-reviewr/pull/59)).
+
+## [0.30.1] — 2026-08-08
+
+### Fixed
+- **Selecting upward.** A range selected from the bottom up now comments on every line in it, not just the line it started from ([#50](https://github.com/persiyanov/herdr-reviewr/issues/50)).
+
+## [0.30.0] — 2026-08-08
+
+### Added
+- **Base picker.** `B`, or a click on the base name, picks the branch the `branch` scope diffs against, remembered per repository.
+- **The header names the base.** `vs dev` while it resolves, `vs main · dev missing` when a pick stops resolving, `no base` when nothing does.
+
+### Changed
+- **One resolution chain.** `--base`, then your pick, then `origin/HEAD`, and no guessing anywhere in it.
+- **`base_branches` is retired.** A config still carrying the key fails to load. Drop it and press `B` instead.
+- **The `All files` tab reads `Files`,** the header stats moved to the right, and the header `Send` button is gone.
+
+## [0.29.0] — 2026-08-01
+
+### Changed
+- **Table cell wrapping.** An over-wide table now shrinks its widest columns and wraps their
+  cells instead of falling back to raw source. Tied columns shrink together. Each column keeps
+  at least 8 cells, and only a table too wide at every floor still renders as its source text.
+
+## [0.28.0] — 2026-07-31
+
+### Added
+- **Hide the navigator.** `z` hides the files navigator so the diff takes the whole body, and
+  shows it again in its kept position and share. While hidden, `tab` brings it back focused,
+  the footer offers `z show`, and the `PR` tab keeps its navigator. Rebind via `navigator-hide`.
+
+## [0.27.1] — 2026-07-31
+
+### Fixed
+- **The stable launch paths now survive the install.** The installer's build step runs in a
+  staging checkout that herdr renames afterwards, so the `~/.local/bin/herdr-reviewr` and
+  `~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr` links pointed at a
+  directory that no longer existed. Every toggle, open, close, or auto-open now re-points
+  both links at the live plugin root, and the installer aims them at the runtime root when
+  herdr provides one.
+
+## [0.27.0] — 2026-07-31
+
+### Added
+- **Any pane running the binary is a full reviewr pane.** A layout plugin or a hand-typed
+  command launches reviewr with `command = "herdr-reviewr"` and gets the same pane the
+  toggle opens: the binary asks herdr for your plugin config when `HERDR_PLUGIN_CONFIG_DIR`
+  is not set, and the toggle, open, and close actions recognize every reviewr pane by its
+  foreground process instead of a label. The installer links the binary at the stable paths
+  `~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr` and
+  `~/.local/bin/herdr-reviewr`, so layouts have a fixed command to name. (#20)
+
+### Changed
+- **The sidebar is now the pane.** The action titles read "reviewr: toggle/open/close pane",
+  and the docs follow. The keybindings and action ids are unchanged.
+
+## [0.26.2] — 2026-07-29
+
+### Fixed
+- **Send arrives intact when the agent input is in vim normal mode.** The batch went to the
+  agent as raw bytes, so a vim-style input resting in normal mode ran its leading characters
+  as commands: `bit/…` arrived as `t/…`, and a batch starting with `dd` could edit whatever
+  was already typed. The send now travels as one bracketed paste, which the input inserts
+  literally in any mode. A paste terminator inside the batch is removed so it cannot end the
+  frame early. The clipboard export is unchanged. (#41)
+
+## [0.26.1] — 2026-07-28
+
+### Fixed
+- **A `tab`-placement sidebar is now labeled in the tab bar.** herdr gives a fresh tab a bare
+  number, so the sidebar showed up as a stray like `4` and got closed as clutter. It now names
+  the tab `reviewr`. The rename is best-effort, so an open that already succeeded never fails
+  because the rename did.
+
+## [0.26.0] — 2026-07-28
+
+### Changed
+- **Last turn works with any number of agents, in any sidebar placement.** A turn now belongs to
+  the worktree rather than to one agent reviewr had to guess at. Work starts when any agent in the
+  worktree starts and ends when they all stop, so two agents on one worktree read as one turn
+  instead of stalling the scope. Before, anything reviewr could not resolve to exactly one agent
+  left `last turn` waiting forever, which is what happened with a second agent around or with the
+  sidebar in its own tab. The `PR` tab's per-turn refresh was stuck the same way and comes back
+  with it.
+- **Last turn says why it is empty.** It reads `no agent works here` when nothing is running in the
+  worktree, and `waiting for the first turn` when an agent is there but has not started yet. The
+  old single message claimed a turn was coming even when none could.
+- **reviewr now needs herdr 0.7.5.** Worktree turns read each agent's working directory from
+  `herdr agent list`, which older versions are not known to report.
+
+### Fixed
+- **The `PR` tab refreshes after a turn you answered a prompt in.** A turn that went from working
+  to a permission prompt and then straight to idle never registered as having ended, so the tab
+  skipped its per-turn refetch for it.
 
 ## [0.25.1] — 2026-07-27
 
